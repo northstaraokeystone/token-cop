@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Token Cop",
+  "version": "1.0",
+  "description": "Infinite context test",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://grok.x.ai/*",
+        "https://x.ai/*",
+        "https://*.grok.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": []
+}
