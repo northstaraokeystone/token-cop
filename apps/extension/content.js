@@ -1,15 +1,17 @@
-// TOKEN COP 4.1 — Local Fork Bus / TruthRun Shadow Ledger / Context Proof / Gravity Chunking
+// TOKEN COP 4.2 — Local Fork Bus / TruthRun Shadow Ledger / Context Proof / Gravity Chunking / Spooky Mode
 
 (() => {
   "use strict";
 
-  const VERSION = "4.1";
+  const VERSION = "4.2";
   const TOKEN_LIMIT = 128_000;
   const AUTO_REAP_COOLDOWN = 30_000;
 
   const PARODY_STORAGE_KEY = "tcParody";
   const FORK_STORAGE_KEY = "tcForkPayload_v1";
   const LEDGER_STORAGE_KEY = "tcTruthRunLedger";
+  const SPOOKY_MODE_KEY = "tcSpookyMode";
+  const SPOOKY_PACKET_KEY = "tcSpookyPacket";
 
   const MESSAGE_SELECTOR =
     'article,[data-testid*="message"],[class*="message"],[class*="turn"]';
@@ -45,6 +47,11 @@
     parodyMode = localStorage.getItem(PARODY_STORAGE_KEY) !== "false";
   } catch (_) {}
 
+  let spookyMode = false;
+  try {
+    spookyMode = localStorage.getItem(SPOOKY_MODE_KEY) === "true";
+  } catch (_) {}
+
   let isReaping = false;
   let forkAdopted = false;
   let badge = null;
@@ -55,6 +62,17 @@
   let lastPctEstimate = 0;
   let sweepScheduled = false;
   let lastAutoReapAt = 0;
+
+  // idle tracking for Spooky Mode
+  let lastActiveAt = Date.now();
+  let spookyIdleLoopStarted = false;
+  let spookySaveInFlight = false;
+  const SPOOKY_IDLE_MS = 2 * 60 * 1000;
+  const SPOOKY_IDLE_CHECK_MS = 15 * 1000;
+
+  const markActive = () => {
+    lastActiveAt = Date.now();
+  };
 
   // track last hovered message for keyboard-only fork
   let lastHoveredMessageEl = null;
@@ -559,12 +577,16 @@
     );
   };
 
-  const defaultBadgeHTML = () =>
-    parodyMode
+  const defaultBadgeHTML = () => {
+    if (spookyMode) {
+      return "Spooky Mode // entangled";
+    }
+    return parodyMode
       ? `🚔 TOKEN COP 🚔 <span id="tc-tokens">${lastTokenEstimate.toLocaleString()}</span>/128k`
       : `TOKEN COP · <span id="tc-tokens">${lastTokenEstimate.toLocaleString()}</span>/128k · <span id="tc-pct">${lastPctEstimate.toFixed(
           1
         )}%</span>`;
+  };
 
   const ensureBadge = () => {
     if (badge && document.body.contains(badge)) return badge;
@@ -585,11 +607,35 @@
       }
     } catch (_) {}
 
+    if (spookyMode) {
+      badge.style.animation = "none";
+      badge.style.boxShadow = "none";
+      badge.style.borderRadius = "0";
+      badge.style.transition = "none";
+      badge.innerHTML = "Spooky Mode // entangled";
+    }
+
     return badge;
+  };
+
+  const applySpookyBadgeStyle = () => {
+    const b = ensureBadge();
+    b.innerHTML = "Spooky Mode // entangled";
+    b.style.background = "#000";
+    b.style.color = "#0f0";
+    b.style.borderColor = "#0f0";
+    b.style.boxShadow = "none";
+    b.style.animation = "none";
+    b.style.borderRadius = "0";
+    b.style.transition = "none";
   };
 
   const paintBadge = (label, borderColor, textColor, boxShadow) => {
     const b = ensureBadge();
+    if (spookyMode) {
+      applySpookyBadgeStyle();
+      return;
+    }
     if (label) b.innerHTML = label;
     if (borderColor) b.style.borderColor = borderColor;
     if (textColor) b.style.color = textColor;
@@ -650,14 +696,21 @@
 
     const b = ensureBadge();
     const revertHTML = defaultBadgeHTML();
-    b.innerHTML = "LEDGER ENTRY LOCKED 🧠";
-    b.style.borderColor = "#0ff";
+
+    if (!spookyMode) {
+      b.innerHTML = "LEDGER ENTRY LOCKED 🧠";
+      b.style.borderColor = "#0ff";
+    }
 
     setTimeout(() => {
-      b.innerHTML = revertHTML;
-      b.style.borderColor = "#0f0";
-      b.style.color = "#0f0";
-      b.style.boxShadow = "0 0 60px #0f0";
+      if (spookyMode) {
+        applySpookyBadgeStyle();
+      } else {
+        b.innerHTML = revertHTML;
+        b.style.borderColor = "#0f0";
+        b.style.color = "#0f0";
+        b.style.boxShadow = "0 0 60px #0f0";
+      }
     }, 3000);
 
     try {
@@ -667,17 +720,214 @@
     return entry;
   };
 
-  const verifyLedger = async () => {
-    const ledger = getLedger();
+  const verifyLedgerChain = async ledger => {
+    if (!Array.isArray(ledger)) return false;
     let prev = null;
     for (let i = 0; i < ledger.length; i++) {
-      const { id, ts, type, data, hash, prev: recordedPrev } = ledger[i];
+      const entry = ledger[i] || {};
+      const { id, ts, type, data, hash, prev: recordedPrev } = entry;
       if (recordedPrev !== prev) return false;
       const expected = await hashData({ id, ts, type, data, prev });
       if (hash !== expected) return false;
       prev = hash;
     }
     return true;
+  };
+
+  const verifyLedger = () => verifyLedgerChain(getLedger());
+
+  // --- Spooky Mode helpers (deflate-raw + base64 snapshot) ---
+
+  const textToBase64 = text => {
+    const bytes = new TextEncoder().encode(String(text || ""));
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
+
+  const base64ToText = b64 => {
+    const binary = atob(String(b64 || ""));
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  };
+
+  const compressSpooky = async text => {
+    const raw = String(text || "");
+    if (typeof CompressionStream !== "function") {
+      return { algo: "plain", packet: textToBase64(raw) };
+    }
+    try {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(raw);
+      const cs = new CompressionStream("deflate-raw");
+      const writer = cs.writable.getWriter();
+      writer.write(data);
+      writer.close();
+      const resp = new Response(cs.readable);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(binary);
+      return { algo: "deflate-raw", packet: b64 };
+    } catch (e) {
+      console.warn("Token Cop: spooky compress failed, using plain base64", e);
+      return { algo: "plain", packet: textToBase64(raw) };
+    }
+  };
+
+  const decompressSpooky = async (packet, algo) => {
+    const mode = algo || "deflate-raw";
+    const b64 = String(packet || "");
+    if (!b64) return null;
+
+    if (mode === "plain" || typeof DecompressionStream !== "function") {
+      try {
+        return base64ToText(b64);
+      } catch (e) {
+        console.warn("Token Cop: spooky plain decode failed", e);
+        return null;
+      }
+    }
+
+    try {
+      const binary = atob(b64);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const ds = new DecompressionStream("deflate-raw");
+      const writer = ds.writable.getWriter();
+      writer.write(bytes);
+      writer.close();
+      const resp = new Response(ds.readable);
+      const buf = await resp.arrayBuffer();
+      return new TextDecoder().decode(buf);
+    } catch (e) {
+      console.warn("Token Cop: spooky decompress failed, trying plain base64", e);
+      try {
+        return base64ToText(b64);
+      } catch (_) {
+        return null;
+      }
+    }
+  };
+
+  const saveSpookyPacket = async reason => {
+    if (!spookyMode) return;
+    if (spookySaveInFlight) return;
+    spookySaveInFlight = true;
+    try {
+      const ledger = getLedger();
+      const messages = harvestMessages({ scrollAll: true });
+
+      const snapshot = {
+        v: VERSION,
+        ts: Date.now(),
+        origin: location.href,
+        reason: reason || "idle",
+        ledger,
+        messages,
+        ledgerHead: document.documentElement.dataset.tcLedgerHead || null
+      };
+
+      const rootHash = await hashData(snapshot);
+      const payload = {
+        rootHash: rootHash || null,
+        snapshot
+      };
+
+      const json = JSON.stringify(payload);
+      const result = await compressSpooky(json);
+      if (!result || !result.packet) return;
+
+      const record = {
+        algo: result.algo,
+        hashFrag: (rootHash || "").slice(0, 16),
+        packet: result.packet
+      };
+
+      safeSet(SPOOKY_PACKET_KEY, JSON.stringify(record));
+    } catch (e) {
+      console.warn("Token Cop: saveSpookyPacket failed", e);
+    } finally {
+      spookySaveInFlight = false;
+    }
+  };
+
+  const startSpookyIdleLoop = () => {
+    if (spookyIdleLoopStarted) return;
+    spookyIdleLoopStarted = true;
+    setInterval(() => {
+      if (!spookyMode) return;
+      const now = Date.now();
+      if (now - lastActiveAt >= SPOOKY_IDLE_MS) {
+        lastActiveAt = now;
+        void saveSpookyPacket("idle");
+      }
+    }, SPOOKY_IDLE_CHECK_MS);
+  };
+
+  const trySpookyResume = async () => {
+    let raw = safeGet(SPOOKY_PACKET_KEY);
+    if (!raw) return;
+
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch (_) {
+      return;
+    }
+    if (!record || !record.packet) return;
+
+    const text = await decompressSpooky(record.packet, record.algo);
+    if (!text) return;
+
+    let envelope;
+    try {
+      envelope = JSON.parse(text);
+    } catch (_) {
+      return;
+    }
+    if (!envelope || !envelope.snapshot) return;
+
+    const snapshot = envelope.snapshot;
+    const rootHash = envelope.rootHash || null;
+
+    const recomputed = await hashData(snapshot);
+    if (rootHash && recomputed && rootHash !== recomputed) {
+      console.warn("Token Cop: spooky resume hash mismatch, discarding packet");
+      return;
+    }
+
+    const candidateLedger = Array.isArray(snapshot.ledger)
+      ? snapshot.ledger
+      : [];
+    const ok = await verifyLedgerChain(candidateLedger);
+    if (!ok) {
+      console.warn("Token Cop: spooky resume ledger verification failed");
+      return;
+    }
+
+    ledgerCache = candidateLedger.slice();
+    saveLedger();
+
+    try {
+      const last = candidateLedger[candidateLedger.length - 1];
+      const head = last && last.hash ? String(last.hash).slice(0, 16) : null;
+      if (head) {
+        document.documentElement.dataset.tcLedgerHead = head;
+      }
+    } catch (_) {}
   };
 
   const findInputElement = () => {
@@ -1073,6 +1323,11 @@
       autoReap();
     }
 
+    if (spookyMode) {
+      applySpookyBadgeStyle();
+      return;
+    }
+
     if (parodyMode) {
       if (lastPctEstimate >= 98) {
         b.innerHTML = `🚨 ${P.death} 🚨`;
@@ -1152,16 +1407,22 @@
       });
 
       const b = ensureBadge();
-      b.innerHTML = "CONTEXT FINGERPRINT COPIED ✅";
-      b.style.borderColor = "#0ff";
-      b.style.color = "#0ff";
-      b.style.boxShadow = "0 0 80px #0ff";
+      if (!spookyMode) {
+        b.innerHTML = "CONTEXT FINGERPRINT COPIED ✅";
+        b.style.borderColor = "#0ff";
+        b.style.color = "#0ff";
+        b.style.boxShadow = "0 0 80px #0ff";
+      }
 
       setTimeout(() => {
-        b.innerHTML = defaultBadgeHTML();
-        b.style.borderColor = "#0f0";
-        b.style.color = "#0f0";
-        b.style.boxShadow = "0 0 60px #0f0";
+        if (spookyMode) {
+          applySpookyBadgeStyle();
+        } else {
+          b.innerHTML = defaultBadgeHTML();
+          b.style.borderColor = "#0f0";
+          b.style.color = "#0f0";
+          b.style.boxShadow = "0 0 60px #0f0";
+        }
       }, 2600);
     });
   };
@@ -1196,6 +1457,7 @@
       const entry = ledger[i];
       const row = document.createElement("div");
       row.style.cssText = "border-bottom:1px solid #0f0;padding:8px 0;";
+
       const id = String(entry.id || "").slice(-8);
       const hash = String(entry.hash || "").slice(0, 18);
       const when = entry.ts ? new Date(entry.ts).toLocaleString() : "n/a";
@@ -1205,6 +1467,7 @@
           : entry.data && entry.data.preview
           ? "~"
           : "n/a";
+
       row.innerHTML =
         `<strong>#${id}</strong> · ${when}<br>` +
         `Type: ${entry.type} · Hash: ${hash}…<br>` +
@@ -1247,6 +1510,7 @@
   document.addEventListener(
     "mousemove",
     e => {
+      markActive();
       let node = e.target;
       while (node && node !== document.body) {
         if (node.matches && node.matches(MESSAGE_SELECTOR)) {
@@ -1261,6 +1525,7 @@
 
   document.addEventListener("keydown", e => {
     if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
+    markActive();
     const key = (e.key || "").toUpperCase();
 
     if (key === "P") {
@@ -1274,9 +1539,13 @@
 
       const b = ensureBadge();
       b.innerHTML = defaultBadgeHTML();
-      b.style.borderColor = "#0f0";
-      b.style.color = "#0f0";
-      b.style.boxShadow = "0 0 60px #0f0";
+      if (spookyMode) {
+        applySpookyBadgeStyle();
+      } else {
+        b.style.borderColor = "#0f0";
+        b.style.color = "#0f0";
+        b.style.boxShadow = "0 0 60px #0f0";
+      }
     } else if (key === "L") {
       e.preventDefault();
       e.stopPropagation();
@@ -1344,6 +1613,29 @@
       const messages = harvestMessages({ scrollAll: true });
       const summaryPrompt = buildGravitySummaryPrompt(messages);
       spawnFork(summaryPrompt, "reap");
+    } else if (key === "M") {
+      // Alt+M: Spooky Mode toggle
+      e.preventDefault();
+      e.stopPropagation();
+
+      spookyMode = !spookyMode;
+      try {
+        localStorage.setItem(SPOOKY_MODE_KEY, String(spookyMode));
+      } catch (_) {}
+
+      const b = ensureBadge();
+      if (spookyMode) {
+        applySpookyBadgeStyle();
+      } else {
+        b.innerHTML = defaultBadgeHTML();
+        b.style.background = "#000";
+        b.style.color = "#0f0";
+        b.style.borderColor = "#0f0";
+        b.style.borderRadius = "60px";
+        b.style.boxShadow = "0 0 60px #0f0";
+        b.style.animation = "tc-pulse 1.4s infinite";
+        b.style.transition = "all .5s";
+      }
     }
   });
 
@@ -1360,6 +1652,8 @@
     attachForkButtons();
     scheduleContextSweep();
     tryAdoptFork();
+    startSpookyIdleLoop();
+    void trySpookyResume();
 
     setInterval(() => {
       tryAdoptFork();
@@ -1368,27 +1662,32 @@
     }, 2500);
 
     window.addEventListener("focus", () => {
+      markActive();
       tryAdoptFork();
       scheduleContextSweep();
     });
 
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
+        markActive();
         tryAdoptFork();
         scheduleContextSweep();
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (spookyMode) {
+        lastActiveAt = 0;
+        void saveSpookyPacket("close");
       }
     });
   };
 
   start();
 
-  console.log(
-    `%cTOKEN COP ${VERSION} — Local Fork Bus online. Shadow DOM can't hide.`,
-    "color:lime;font-size:18px;font-weight:bold"
-  );
-
   // Easter egg — type "cop" in the Grok input to make the badge salute (now safely scoped)
   document.addEventListener("input", e => {
+    markActive();
     const t = e.target;
     if (!t || (t.tagName !== "TEXTAREA" && t.getAttribute("role") !== "textbox"))
       return;
@@ -1396,15 +1695,26 @@
     if (!e.data.toLowerCase().includes("cop")) return;
 
     const b = ensureBadge();
-    b.innerHTML = "🚔🫡 TOKEN COP REPORTING FOR DUTY 🫡🚔";
-    b.style.borderColor = "#00f";
-    b.style.color = "#00f";
-    b.style.boxShadow = "0 0 100px blue";
+    if (!spookyMode) {
+      b.innerHTML = "🚔🫡 TOKEN COP REPORTING FOR DUTY 🫡🚔";
+      b.style.borderColor = "#00f";
+      b.style.color = "#00f";
+      b.style.boxShadow = "0 0 100px blue";
+    }
     setTimeout(() => {
-      b.innerHTML = defaultBadgeHTML();
-      b.style.borderColor = "#0f0";
-      b.style.color = "#0f0";
-      b.style.boxShadow = "0 0 60px #0f0";
+      if (spookyMode) {
+        applySpookyBadgeStyle();
+      } else {
+        b.innerHTML = defaultBadgeHTML();
+        b.style.borderColor = "#0f0";
+        b.style.color = "#0f0";
+        b.style.boxShadow = "0 0 60px #0f0";
+      }
     }, 4000);
   });
+
+  console.log(
+    `%cTOKEN COP ${VERSION} — Local Fork Bus online. Shadow DOM can't hide.`,
+    "color:lime;font-size:18px;font-weight:bold"
+  );
 })();
