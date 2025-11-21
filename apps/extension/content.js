@@ -1,173 +1,480 @@
-// content.js – TOKEN COP FINAL: Pure JS + ZERO-CLICK AUTO-REAP + HIGHWAY PATROL PARODY MODE
-console.log("TOKEN COP – Pure JS estimation + AUTO-REAP + PARODY MODE ACTIVE");
+// TOKEN COP 3.2 — LOCAL FORK BUS
+// No ?prompt, no execCommand, no BroadcastChannel, no window.name.
+// Just localStorage + aggressive input hunting + raw swagger.
 
-// HIGHWAY PATROL PARODY MODE – toggle with Ctrl+Shift+P or set true for default
-let PARODY_MODE = true;  // Set to true for instant chaos, or toggle live with Ctrl+Shift+P
+(() => {
+  "use strict";
 
-const parody = {
-  safe: "You're good to go, citizen. Have a nice day.",
-  yellow: "Slow it down there, partner.",
-  red: "License and registration.",
-  death: "Step out of the context, sir. You've been eating cold burgers again, haven't you?",
-  reaping: "REAPING YOUR CONTEXT, SIR",
-  reaped: "Token Cop is impressed. Carry on."
-};
+  // ---------- STATE ----------
 
-// Secret toggle: Ctrl+Shift+P
-document.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.shiftKey && e.key === "P") {
-    PARODY_MODE = !PARODY_MODE;
-    location.reload();
-  }
-});
-
-function scrapeMessages() {
-  const messages = [];
-
-  // Force-load all old messages with rapid sync scrolling
-  let lastHeight = 0;
-  let attempts = 0;
-  while (attempts < 20) {
-    window.scrollTo(0, document.body.scrollHeight);
-    const current = document.body.scrollHeight;
-    if (current === lastHeight) break;
-    lastHeight = current;
-    attempts++;
-    const start = Date.now();
-    while (Date.now() - start < 200) {}
-  }
-  window.scrollTo(0, 0);
-
-  const selectors = [
-    'div[class*="message"]', 'article', 'div[data-testid*="message"]',
-    'div[class*="turn"]', 'div[class*="chat-message"]', 'main div > div > div'
-  ];
-
-  let elements = [];
-  for (const sel of selectors) {
-    elements = document.querySelectorAll(sel);
-    if (elements.length > 2) break;
+  let PARODY_MODE = true;
+  try {
+    PARODY_MODE = localStorage.getItem("tcParody") !== "false";
+  } catch (e) {
+    PARODY_MODE = true;
   }
 
-  elements.forEach(el => {
-    const text = (el.innerText || el.textContent || "").trim();
-    if (text.length < 20) return;
+  let isReaping = false;
+  const TC_TAB_ID =
+    "tc_" +
+    Date.now().toString(36) +
+    "_" +
+    Math.random().toString(36).slice(2, 8);
 
-    const isUser = text.includes("You:") || 
-                   el.innerText.startsWith("You") || 
-                   el.querySelector('img[alt="You"]') ||
-                   /you|human|user/i.test(text.slice(0, 30));
+  const FORK_KEY = "tcForkPayload_v1";
+  let forkAdopted = false;
 
-    messages.push({ role: isUser ? "user" : "assistant", content: text });
+  const GROK_ROOT = location.origin;
+
+  const P = {
+    fork: "FORKING REALITY — STAND BY",
+    reaping: "REAPING YOUR CONTEXT, SIR",
+    reaped: "Token Cop is impressed. Carry on.",
+    death: "Step out of the context. Cold burgers again.",
+    red: "License and registration.",
+    yellow: "Slow it down, partner.",
+    safe: "You're good to go, citizen."
+  };
+
+  // ---------- HOTKEYS ----------
+
+  document.addEventListener("keydown", e => {
+    if (!e.ctrlKey || !e.shiftKey) return;
+    const key = (e.key || "").toUpperCase();
+
+    if (key === "P") {
+      PARODY_MODE = !PARODY_MODE;
+      try {
+        localStorage.setItem("tcParody", PARODY_MODE);
+      } catch (err) {}
+      location.reload();
+    }
   });
 
-  console.log(`TOKEN COP – Found ${messages.length} messages (full history)`);
-  return messages;
-}
+  // ---------- SAFE TEXT ----------
 
-function estimateTokens(text) {
-  if (!text) return 0;
-  return Math.round((text.length / 3.8) + (text.split(/\s+/).length * 0.05)) + 5;
-}
+  function tcSafeText(node) {
+    try {
+      if (!node) return "";
+      const v = node.innerText;
+      if (typeof v === "string") return v;
+      if (typeof node.textContent === "string") return node.textContent;
+      return "";
+    } catch (e) {
+      return "";
+    }
+  }
 
-// Badge
-const badge = document.createElement("div");
-if (PARODY_MODE) {
-  badge.innerHTML = `🚔 TOKEN COP 🚔 · <span id="tokens">0</span>/128k`;
-  badge.style.fontSize = "20px";
-  badge.style.padding = "18px 40px";
-} else {
-  badge.innerHTML = `TOKEN COP · <span id="tokens">0</span>/128k · <span id="percent">0%</span>`;
-}
-badge.style.cssText = `position:fixed;bottom:20px;right:20px;padding:15px 30px;background:#000;color:#0f0;font-family:"Courier New",monospace;font-weight:bold;font-size:18px;border:5px solid #0f0;border-radius:50px;box-shadow:0 0 40px #0f0;z-index:999999;animation:pulse 1.5s infinite;transition:all 0.4s;`;
-document.body.appendChild(badge);
+  // ---------- MESSAGE HARVEST ----------
 
-document.head.insertAdjacentHTML("beforeend", `<style>@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}</style>`);
-
-// AUTO-REAP ENGINE
-let isReaping = false;
-function autoReap() {
-  if (isReaping) return;
-  isReaping = true;
-
-  badge.innerHTML = PARODY_MODE ? `🚔 ${parody.reaping} 🚔` : "REAPING CONTEXT...";
-  badge.style.borderColor = "#00f";
-  badge.style.color = "#00f";
-  badge.style.boxShadow = "0 0 50px blue";
-
-  const messages = scrapeMessages();
-  const conversationText = messages.map(m => m.content).join("\n\n");
-
-  const summaryPrompt = `Summarize this entire conversation in under 800 words. Keep all key facts, decisions, tone, and inside jokes. Make it feel natural to continue from. Output ONLY the summary:`;
-
-  const fullPrompt = summaryPrompt + "\n\n" + conversationText + "\n\n(Continued automatically by Token Cop – infinite context mode 🚔)";
-
-  const newTab = window.open("https://grok.x.ai", "_blank");
-  if (newTab) {
-    const check = setInterval(() => {
-      const textarea = newTab.document.querySelector('textarea');
-      if (textarea) {
-        textarea.value = fullPrompt;
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        textarea.focus();
-        clearInterval(check);
+  function getAllMessages() {
+    try {
+      let h = 0;
+      for (let i = 0; i < 20; i++) {
+        window.scrollTo(0, document.body.scrollHeight);
+        const nh = document.body.scrollHeight;
+        if (nh === h) break;
+        h = nh;
       }
-    }, 300);
+      window.scrollTo(0, 0);
+    } catch (e) {}
+
+    const msgs = [];
+    try {
+      document
+        .querySelectorAll(
+          '[class*="message"], article, [data-testid*="message"], [class*="turn"]'
+        )
+        .forEach(el => {
+          const text = tcSafeText(el).trim();
+          if (!text || text.length < 20) return;
+          const isUser =
+            /you:|human|^You/i.test(text) ||
+            !!el.querySelector('img[alt="You"]');
+          msgs.push({ role: isUser ? "user" : "assistant", content: text });
+        });
+    } catch (e) {
+      console.warn("Token Cop: getAllMessages failed", e);
+    }
+    return msgs;
   }
 
-  setTimeout(() => {
-    badge.innerHTML = PARODY_MODE ? `🚔 ${parody.reaped} 🚔` : "∞ INFINITE CONTEXT UNLOCKED ∞";
-    badge.style.borderColor = "#0f0";
-    badge.style.color = "#0f0";
-    badge.style.boxShadow = "0 0 80px lime";
-    isReaping = false;
-  }, 5000);
-}
-
-// Update loop
-setInterval(() => {
-  const messages = scrapeMessages();
-  if (messages.length === 0) return;
-
-  let totalTokens = 3;
-  for (const m of messages) {
-    totalTokens += estimateTokens(m.content) + estimateTokens(m.role) + 3 + (m.role === "user" ? 2 : 0);
+  function getMessagesUpToElement(targetEl) {
+    const msgs = [];
+    try {
+      const nodes = document.querySelectorAll(
+        '[class*="message"], article, [data-testid*="message"], [class*="turn"]'
+      );
+      for (const el of nodes) {
+        const text = tcSafeText(el).trim();
+        if (text && text.length >= 20) {
+          const isUser =
+            /you:|human|^You/i.test(text) ||
+            !!el.querySelector('img[alt="You"]');
+          msgs.push({ role: isUser ? "user" : "assistant", content: text });
+        }
+        if (el === targetEl) break;
+      }
+    } catch (e) {
+      console.warn("Token Cop: getMessagesUpToElement failed", e);
+    }
+    return msgs;
   }
 
-  const percent = Math.min(99.9, (totalTokens / 128000) * 100);
+  const est = t => Math.ceil(((t || "").length) / 3.77) + 8;
 
-  document.getElementById("tokens").textContent = Math.round(totalTokens).toLocaleString();
-  if (!PARODY_MODE) document.getElementById("percent").textContent = percent.toFixed(1) + "%";
+  // ---------- BADGE ----------
 
-  if (percent >= 97 && !isReaping) {
-    autoReap();
-  } else if (PARODY_MODE) {
-    if (percent >= 98) {
-      badge.innerHTML = `🚨 ${parody.death} 🚨`;
-      badge.style.borderColor = badge.style.color = "#f00";
-      badge.style.boxShadow = "0 0 60px red";
-    } else if (percent >= 90) {
-      badge.innerHTML = `🚓 ${parody.red}`;
+  let badge = document.createElement("div");
+  badge.innerHTML = PARODY_MODE
+    ? `🚔 TOKEN COP 🚔 <span id="tc-tokens">0</span>/128k`
+    : `TOKEN COP · <span id="tc-tokens">0</span>/128k · <span id="tc-pct">0%</span>`;
+  badge.style.cssText =
+    "position:fixed;bottom:24px;right:24px;padding:20px 44px;background:#000;color:#0f0;font:bold 21px 'Courier New';border:6px solid #0f0;border-radius:60px;box-shadow:0 0 60px #0f0;z-index:999999999;animation:p 1.4s infinite;transition:all .5s;user-select:none;";
+  document.body.appendChild(badge);
+
+  try {
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      "<style>@keyframes p{0%,100%{transform:scale(1)}50%{transform:scale(1.13)}} .tc-fork{pointer-events:auto}</style>"
+    );
+  } catch (e) {}
+
+  // ---------- INPUT HUNTER (SHADOW-DOM AWARE) ----------
+
+  function findInputElement() {
+    const selectors = [
+      "textarea",
+      "input[type='text']",
+      "input[type='search']",
+      "input:not([type])",
+      "[role='textbox']",
+      "div[contenteditable='true']"
+    ];
+
+    function search(root) {
+      if (!root) return null;
+
+      for (const sel of selectors) {
+        try {
+          const el = root.querySelector(sel);
+          if (el) return el;
+        } catch (e) {}
+      }
+
+      let all;
+      try {
+        all = root.querySelectorAll("*");
+      } catch (e) {
+        return null;
+      }
+
+      for (const node of all) {
+        try {
+          if (node.shadowRoot) {
+            const inner = search(node.shadowRoot);
+            if (inner) return inner;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      return null;
+    }
+
+    return search(document);
+  }
+
+  function injectPromptIntoInput(prompt) {
+    const el = findInputElement();
+    if (!el) return false;
+
+    const text = String(prompt || "");
+
+    try {
+      if ("value" in el) {
+        el.value = text;
+      } else {
+        el.textContent = text;
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.focus();
+      return true;
+    } catch (e) {
+      console.warn("Token Cop: injectPromptIntoInput failed", e);
+      return false;
+    }
+  }
+
+  // ---------- LOCAL FORK BUS ----------
+
+  function spawnFork(prompt, mode) {
+    const payload = {
+      id:
+        "fork_" +
+        Date.now().toString(36) +
+        "_" +
+        Math.random().toString(36).slice(2, 8),
+      from: TC_TAB_ID,
+      mode: mode || "fork",
+      prompt: String(prompt || ""),
+      ts: Date.now()
+    };
+
+    try {
+      localStorage.setItem(FORK_KEY, JSON.stringify(payload));
+    } catch (e) {
+      console.warn("Token Cop: localStorage fork write failed", e);
+    }
+
+    // nice-to-have clipboard backup
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(payload.prompt).catch(() => {});
+      }
+    } catch (e) {}
+
+    let tab = null;
+    try {
+      tab = window.open(GROK_ROOT, "_blank");
+    } catch (e) {
+      tab = null;
+    }
+
+    if (!tab) {
+      badge.innerHTML =
+        "POPUP BLOCKED — FORK PROMPT COPIED. ALLOW POPUPS FOR GROK.";
       badge.style.borderColor = "#f00";
-    } else if (percent >= 80) {
-      badge.innerHTML = `🚔 ${parody.yellow}`;
-      badge.style.borderColor = "#ff0";
-      badge.style.color = "#ff0";
+      badge.style.color = "#f00";
+      return;
+    }
+
+    badge.innerHTML = PARODY_MODE
+      ? `🚔 ${P.fork} 🚔`
+      : "FORKING REALITY...";
+    badge.style.borderColor = "#ff0";
+  }
+
+  function tryAdoptFork() {
+    if (forkAdopted) return;
+
+    let raw = null;
+    try {
+      raw = localStorage.getItem(FORK_KEY);
+    } catch (e) {
+      raw = null;
+    }
+    if (!raw) return;
+
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch (e) {
+      console.warn("Token Cop: fork payload parse failed", e);
+      try {
+        localStorage.removeItem(FORK_KEY);
+      } catch (_) {}
+      return;
+    }
+
+    if (!payload || !payload.prompt) {
+      try {
+        localStorage.removeItem(FORK_KEY);
+      } catch (_) {}
+      return;
+    }
+
+    // Don't adopt our own fork in the origin tab.
+    if (payload.from === TC_TAB_ID) return;
+
+    const ok = injectPromptIntoInput(payload.prompt);
+    if (!ok) return; // wait until the UI actually mounts
+
+    forkAdopted = true;
+    try {
+      localStorage.removeItem(FORK_KEY);
+    } catch (_) {}
+
+    if (badge) {
+      if (payload.mode === "reap") {
+        badge.innerHTML = PARODY_MODE
+          ? `🚔 ${P.reaped} 🚔`
+          : "∞ INFINITE CONTEXT UNLOCKED ∞";
+      } else {
+        badge.innerHTML = PARODY_MODE
+          ? "FORK SUCCESSFUL. NEW UNIVERSE ACTIVE 🚔🪐"
+          : "FORKED REALITY CREATED — EDIT & SEND.";
+      }
+      badge.style.borderColor = "#0f0";
+      badge.style.color = "#0f0";
+      badge.style.boxShadow = "0 0 80px lime";
+    }
+  }
+
+  // ---------- FULL-CHAIN FORK BUTTONS ----------
+
+  function injectForkButtons() {
+    let nodes;
+    try {
+      nodes = document.querySelectorAll(
+        '[class*="message"], article, [data-testid*="message"], [class*="turn"]'
+      );
+    } catch (e) {
+      return;
+    }
+
+    nodes.forEach((el, i) => {
+      try {
+        if (el.querySelector(".tc-fork")) return;
+
+        const btn = document.createElement("div");
+        btn.className = "tc-fork";
+        btn.innerHTML = "↔";
+        btn.title = "Fork from here — spawn parallel universe";
+        btn.style.cssText =
+          "position:absolute;top:12px;right:16px;font-size:26px;cursor:pointer;opacity:0;transition:opacity .25s;z-index:99999;filter:drop-shadow(0 0 8px lime);";
+
+        const cs = getComputedStyle(el);
+        if (!cs.position || cs.position === "static") {
+          el.style.position = "relative";
+        }
+        el.appendChild(btn);
+
+        el.addEventListener("mouseenter", () => {
+          btn.style.opacity = "1";
+        });
+        el.addEventListener("mouseleave", () => {
+          btn.style.opacity = "0";
+        });
+
+        btn.addEventListener("click", e => {
+          e.stopPropagation();
+
+          badge.innerHTML = PARODY_MODE
+            ? `🚔 ${P.fork} 🚔`
+            : "FORKING REALITY...";
+          badge.style.borderColor = "#ff0";
+
+          let history = getMessagesUpToElement(el);
+
+          if (!history.length) {
+            const text = tcSafeText(el).trim();
+            if (text) history.push({ role: "user", content: text });
+          }
+
+          if (!history.length) {
+            history.push({
+              role: "system",
+              content:
+                "Token Cop fork created with no captured context. Continue as a fresh parallel universe."
+            });
+          }
+
+          const prompt =
+            history
+              .map(m => `${m.role.toUpperCase()}:\n${m.content}`)
+              .join("\n\n") +
+            "\n\n(Continued from Token Cop Full-Chain Fork — parallel universe active 🚔↔️)";
+
+          spawnFork(prompt, "fork");
+        });
+      } catch (e) {}
+    });
+  }
+
+  // ---------- AUTO-REAP ----------
+
+  function autoReap() {
+    if (isReaping) return;
+    isReaping = true;
+
+    badge.innerHTML = PARODY_MODE ? `🚔 ${P.reaping} 🚔` : "REAPING...";
+    badge.style.borderColor = "#00f";
+    badge.style.color = "#00f";
+
+    const messages = getAllMessages();
+    const text = messages.map(m => m.content).join("\n\n");
+
+    const prompt =
+      "Summarize this entire conversation in under 800 words. Keep facts, decisions, tone, inside jokes. Output ONLY the summary:" +
+      "\n\n" +
+      text +
+      "\n\n(Continued by Token Cop — infinite mode active 🚔)";
+
+    spawnFork(prompt, "reap");
+
+    setTimeout(() => {
+      if (!forkAdopted) {
+        badge.innerHTML = PARODY_MODE
+          ? `🚔 ${P.reaped} 🚔`
+          : "∞ INFINITE CONTEXT REQUESTED ∞";
+        badge.style.borderColor = "#0f0";
+        badge.style.color = "#0f0";
+        badge.style.boxShadow = "0 0 80px lime";
+      }
+      isReaping = false;
+    }, 5000);
+  }
+
+  // ---------- MAIN LOOP ----------
+
+  setInterval(() => {
+    injectForkButtons();
+    tryAdoptFork();
+
+    const messages = getAllMessages();
+    if (!messages.length) return;
+
+    let total = 3;
+    messages.forEach(m => {
+      total +=
+        est(m.role) +
+        est(m.content) +
+        3 +
+        (m.role === "user" ? 2 : 0);
+    });
+
+    const pct = Math.min(99.9, total / 1280);
+
+    const tokNode = document.getElementById("tc-tokens");
+    if (tokNode) tokNode.textContent = Math.round(total).toLocaleString();
+
+    if (!PARODY_MODE) {
+      const pctNode = document.getElementById("tc-pct");
+      if (pctNode) pctNode.textContent = pct.toFixed(1) + "%";
+    }
+
+    if (pct >= 97 && !isReaping) autoReap();
+
+    if (PARODY_MODE) {
+      if (pct >= 98) badge.innerHTML = `🚨 ${P.death} 🚨`;
+      else if (pct >= 90) badge.innerHTML = `🚓 ${P.red}`;
+      else if (pct >= 80) badge.innerHTML = `🚔 ${P.yellow}`;
+      else
+        badge.innerHTML = `🚔 ${P.safe} · <span id="tc-tokens">${Math.round(
+          total
+        ).toLocaleString()}</span>/128k`;
     } else {
-      badge.innerHTML = `🚔 ${parody.safe} · <span id="tokens">${Math.round(totalTokens).toLocaleString()}</span>/128k`;
-      badge.style.borderColor = badge.style.color = "#0f0";
+      if (pct >= 98) {
+        badge.innerHTML = "☠️ CONTEXT DEATH IMMINENT ☠️";
+        badge.style.borderColor = "#f00";
+        badge.style.color = "#f00";
+        badge.style.boxShadow = "0 0 60px red";
+      } else if (pct >= 90) {
+        badge.style.borderColor = "#f00";
+      } else if (pct >= 80) {
+        badge.style.borderColor = "#ff0";
+      } else {
+        badge.style.borderColor = "#0f0";
+        badge.style.color = "#0f0";
+      }
     }
-  } else {
-    if (percent >= 98) {
-      badge.innerHTML = "☠️ CONTEXT DEATH IMMINENT ☠️";
-      badge.style.borderColor = badge.style.color = "#f00";
-      badge.style.boxShadow = "0 0 60px red";
-    } else if (percent >= 90) {
-      badge.style.borderColor = "#f00";
-    } else if (percent >= 80) {
-      badge.style.borderColor = "#ff0";
-    }
-  }
-}, 2500);
+  }, 2500);
 
-console.log("TOKEN COP – Production ready with Parody Mode (Ctrl+Shift+P to toggle)");
+  console.log(
+    "%cTOKEN COP 3.2 — Local Fork Bus online. Shadow DOM can't hide.",
+    "color:lime;font-size:18px;font-weight:bold"
+  );
+})();
