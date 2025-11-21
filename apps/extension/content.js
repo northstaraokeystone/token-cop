@@ -1,9 +1,9 @@
-// TOKEN COP 4.0 — Local Fork Bus / TruthRun Shadow Ledger / Context Proof
+// TOKEN COP 4.1 — Local Fork Bus / TruthRun Shadow Ledger / Context Proof / Gravity Chunking
 
 (() => {
   "use strict";
 
-  const VERSION = "4.0";
+  const VERSION = "4.1";
   const TOKEN_LIMIT = 128_000;
   const AUTO_REAP_COOLDOWN = 30_000;
 
@@ -56,6 +56,9 @@
   let sweepScheduled = false;
   let lastAutoReapAt = 0;
 
+  // track last hovered message for keyboard-only fork
+  let lastHoveredMessageEl = null;
+
   const safeText = node => {
     try {
       if (!node) return "";
@@ -72,6 +75,444 @@
     const len = t.length || 0;
     return len ? Math.ceil(len / 3.77) + 8 : 0;
   };
+
+  // --- GRAVITY CHUNKING CONSTANTS & HELPERS (Token Cop Gravity Edition) ---
+
+  const MAX_GRAVITY_TOKENS = 40_000;
+  const GRAVITY_CHUNK_TARGET = 10;
+  const MIN_SENTENCE_LENGTH = 24;
+
+  const GRAVITY_KEYWORDS = [
+    "plan",
+    "next",
+    "later",
+    "today",
+    "tomorrow",
+    "week",
+    "roadmap",
+    "strategy",
+    "todo",
+    "task",
+    "action",
+    "ship",
+    "implement",
+    "build",
+    "fix",
+    "bug",
+    "issue",
+    "risk",
+    "problem",
+    "decision",
+    "decide",
+    "decided",
+    "choose",
+    "chosen",
+    "commit",
+    "deadline",
+    "architecture",
+    "design",
+    "spec",
+    "contract",
+    "interface",
+    "api",
+    "schema",
+    "constraint",
+    "limit",
+    "assumption",
+    "hypothesis",
+    "experiment",
+    "result",
+    "evidence",
+    "why",
+    "because"
+  ];
+
+  const SUMMARY_MARKERS = [
+    "tl;dr",
+    "tldr",
+    "summary",
+    "in summary",
+    "in short",
+    "to summarize",
+    "to summarise",
+    "recap",
+    "key points",
+    "takeaway",
+    "takeaways"
+  ];
+
+  const EMOTION_MARKERS = [
+    "worried",
+    "concerned",
+    "blocked",
+    "excited",
+    "stuck",
+    "confused",
+    "happy",
+    "sad",
+    "annoyed",
+    "frustrated",
+    "anxious",
+    "thrilled"
+  ];
+
+  const containsAny = (lowerText, list) => {
+    for (let i = 0; i < list.length; i++) {
+      if (lowerText.indexOf(list[i]) !== -1) return true;
+    }
+    return false;
+  };
+
+  const countMatches = (lowerText, list) => {
+    let count = 0;
+    for (let i = 0; i < list.length; i++) {
+      const needle = list[i];
+      let idx = lowerText.indexOf(needle);
+      while (idx !== -1) {
+        count++;
+        idx = lowerText.indexOf(needle, idx + needle.length);
+      }
+    }
+    return count;
+  };
+
+  const takeLastTokens = (messages, maxTokens) => {
+    if (!messages || !messages.length) return [];
+    const out = [];
+    let total = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      const t =
+        estTokens(m.role) +
+        estTokens(m.content) +
+        3 +
+        (m.role === "user" ? 2 : 0);
+      if (total + t > maxTokens && out.length) break;
+      out.push(m);
+      total += t;
+    }
+    return out.reverse();
+  };
+
+  const explodeIntoSentences = text => {
+    if (!text) return [];
+    let cleaned = String(text).replace(/\s+/g, " ").trim();
+    if (!cleaned) return [];
+    const roughParts = cleaned.split(/\n+/);
+    const out = [];
+    for (let p = 0; p < roughParts.length; p++) {
+      const block = roughParts[p].trim();
+      if (!block) continue;
+      let buf = "";
+      for (let i = 0; i < block.length; i++) {
+        const ch = block[i];
+        buf += ch;
+        if (ch === "." || ch === "!" || ch === "?") {
+          const next = block[i + 1] || "";
+          if (next === " " || next === "\n" || next === "\t" || next === "") {
+            const s = buf.trim();
+            if (s.length) {
+              out.push(s);
+              buf = "";
+            }
+          }
+        }
+      }
+      if (buf.trim().length) {
+        out.push(buf.trim());
+      }
+    }
+    return out;
+  };
+
+  const splitSentencesForGravity = messages => {
+    const segments = [];
+    if (!messages || !messages.length) return segments;
+    const totalMsgs = messages.length || 1;
+    let globalIndex = 0;
+
+    for (let mi = 0; mi < messages.length; mi++) {
+      const msg = messages[mi];
+      const role = msg.role || "assistant";
+      const recency = (mi + 1) / totalMsgs;
+      const raw = (msg.content || "").trim();
+      if (!raw) continue;
+
+      const sentences = explodeIntoSentences(raw);
+      for (let si = 0; si < sentences.length; si++) {
+        const text = sentences[si].trim();
+        if (!text) continue;
+        if (text.length < MIN_SENTENCE_LENGTH) continue;
+
+        segments.push({
+          id: globalIndex,
+          globalIndex,
+          messageIndex: mi,
+          role,
+          text,
+          recency
+        });
+        globalIndex++;
+      }
+    }
+    return segments;
+  };
+
+  const scoreSentenceGravity = segments => {
+    const baseScores = [];
+    const len = segments.length;
+    if (!len) {
+      return { baseScores: [], finalScores: [] };
+    }
+
+    for (let i = 0; i < len; i++) {
+      const seg = segments[i];
+      const text = seg.text || "";
+      const lower = text.toLowerCase();
+      const L = text.length;
+
+      const lengthWeight = Math.min(1.5, Math.sqrt(L / 80));
+      const hasDigit = /\d/.test(text);
+      const digitWeight = hasDigit ? 0.35 : 0;
+
+      const keywordWeight = Math.min(
+        2.0,
+        countMatches(lower, GRAVITY_KEYWORDS) * 0.3
+      );
+      const summaryWeight = containsAny(lower, SUMMARY_MARKERS) ? 1.0 : 0;
+      const emotionWeight = containsAny(lower, EMOTION_MARKERS) ? 0.35 : 0;
+      const questionWeight = text.indexOf("?") !== -1 ? 0.25 : 0;
+      const bulletWeight = /^[\-\*•]/.test(text) ? 0.25 : 0;
+
+      let roleFactor = 1.0;
+      if (seg.role === "user") roleFactor = 1.25;
+      else if (seg.role === "system") roleFactor = 1.1;
+
+      const positionFactor = 0.6 + 0.4 * (seg.recency || 0.0);
+
+      const compositional =
+        0.4 +
+        lengthWeight +
+        digitWeight +
+        keywordWeight +
+        summaryWeight +
+        emotionWeight +
+        questionWeight +
+        bulletWeight;
+
+      const score = compositional * roleFactor * positionFactor;
+      baseScores.push(score);
+    }
+
+    const finalScores = baseScores.slice();
+    const n = finalScores.length;
+    if (n <= 1) {
+      return { baseScores, finalScores };
+    }
+
+    let maxScore = baseScores[0];
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      if (baseScores[i] > maxScore) maxScore = baseScores[i];
+      sum += baseScores[i];
+    }
+    const mean = sum / n;
+    let varSum = 0;
+    for (let i = 0; i < n; i++) {
+      const d = baseScores[i] - mean;
+      varSum += d * d;
+    }
+    const std = Math.sqrt(varSum / n);
+    const seedCutoff = mean + 0.5 * std;
+
+    const sortedIdx = Array.from({ length: n }, (_, i) => i).sort(
+      (a, b) => baseScores[b] - baseScores[a]
+    );
+    const maxSeedsByCount = Math.max(8, Math.min(24, Math.round(n * 0.12)));
+    const seeds = [];
+    for (let k = 0; k < n && seeds.length < maxSeedsByCount; k++) {
+      const idx = sortedIdx[k];
+      if (baseScores[idx] >= seedCutoff || seeds.length < 8) {
+        seeds.push(idx);
+      }
+    }
+
+    const radius = 24;
+    for (let s = 0; s < seeds.length; s++) {
+      const center = seeds[s];
+      const seedScore = baseScores[center];
+      for (let offset = -radius; offset <= radius; offset++) {
+        if (offset === 0) continue;
+        const j = center + offset;
+        if (j < 0 || j >= n) continue;
+        const dist = Math.abs(offset);
+        const decay = Math.exp(-dist / 6);
+        const influence = seedScore * decay * 0.7;
+        finalScores[j] += influence;
+      }
+    }
+
+    return { baseScores, finalScores };
+  };
+
+  const buildGravityChunks = (segments, finalScores, maxChunks) => {
+    const n = segments.length;
+    if (!n || !finalScores || !finalScores.length) return [];
+
+    let minScore = finalScores[0];
+    let maxScore = finalScores[0];
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const v = finalScores[i];
+      if (v < minScore) minScore = v;
+      if (v > maxScore) maxScore = v;
+      sum += v;
+    }
+    const mean = sum / n;
+    const range = maxScore - minScore || 1;
+    const thresholdHalo = mean + 0.25 * range;
+    const thresholdCore = mean + 0.55 * range;
+
+    const chunks = [];
+    let i = 0;
+    while (i < n) {
+      if (finalScores[i] < thresholdHalo) {
+        i++;
+        continue;
+      }
+      const start = i;
+      let end = i;
+      let hasCore = finalScores[i] >= thresholdCore;
+      i++;
+      while (i < n && finalScores[i] >= thresholdHalo) {
+        if (finalScores[i] >= thresholdCore) hasCore = true;
+        end = i;
+        i++;
+      }
+      if (!hasCore) continue;
+
+      const indices = [];
+      let scoreSum = 0;
+      let charSum = 0;
+      for (let j = start; j <= end; j++) {
+        indices.push(j);
+        scoreSum += finalScores[j];
+        charSum += (segments[j].text || "").length;
+      }
+      const avgScore = scoreSum / indices.length;
+      const gravityScore = avgScore * Math.log(1 + charSum);
+      chunks.push({ start, end, indices, gravityScore });
+    }
+
+    chunks.sort((a, b) => b.gravityScore - a.gravityScore);
+    const top = chunks.slice(0, maxChunks || GRAVITY_CHUNK_TARGET);
+    const result = [];
+
+    for (let c = 0; c < top.length; c++) {
+      const chunk = top[c];
+      const segs = chunk.indices
+        .map(idx => segments[idx])
+        .sort((a, b) => a.globalIndex - b.globalIndex);
+
+      let text = "";
+      let prevMsgIndex = -1;
+      for (let j = 0; j < segs.length; j++) {
+        const seg = segs[j];
+        if (seg.messageIndex !== prevMsgIndex) {
+          if (text) text += "\n\n";
+          text += (seg.role || "assistant").toUpperCase() + ":\n";
+          prevMsgIndex = seg.messageIndex;
+        } else {
+          text += " ";
+        }
+        text += (seg.text || "").trim();
+      }
+
+      result.push({
+        score: chunk.gravityScore,
+        text: text.trim()
+      });
+    }
+
+    return result;
+  };
+
+  const buildGravitySummaryPrompt = allMessages => {
+    const messages = Array.isArray(allMessages) ? allMessages : [];
+    if (!messages.length) {
+      return (
+        "Summarize this conversation in under 800 words. Output ONLY the summary.\n\n" +
+        "(Token Cop gravity mode had no messages to work with.)"
+      );
+    }
+
+    const contextMessages = takeLastTokens(messages, MAX_GRAVITY_TOKENS);
+    const segments = splitSentencesForGravity(contextMessages);
+    let gravityChunks = [];
+
+    try {
+      const scored = scoreSentenceGravity(segments);
+      gravityChunks = buildGravityChunks(
+        segments,
+        scored.finalScores,
+        GRAVITY_CHUNK_TARGET
+      );
+    } catch (e) {
+      console.warn(
+        "Token Cop: gravity chunking failed, falling back to last messages only",
+        e
+      );
+      gravityChunks = [];
+    }
+
+    if (!gravityChunks || !gravityChunks.length) {
+      const tailMsgs = contextMessages.slice(-12);
+      const tailBlock = tailMsgs
+        .map(m => `${(m.role || "assistant").toUpperCase()}:\n${m.content}`)
+        .join("\n\n");
+      return (
+        "You are recovering a long conversation on grok.x.ai. The full history no longer fits in context.\n\n" +
+        "Token Cop failed to build gravity chunks, so you only get the last few turns. " +
+        "Summarize the entire conversation as best you can in under 800 words, keeping facts, decisions, tone, running plans, and inside jokes. " +
+        "Output ONLY the summary:\n\n" +
+        tailBlock +
+        "\n\n(Continued by Token Cop — fallback gravity mode 🚔)"
+      );
+    }
+
+    const chunkSection = gravityChunks
+      .map(
+        (chunk, idx) =>
+          `CHUNK ${idx + 1} (gravity=${chunk.score.toFixed(2)}):\n${chunk.text}`
+      )
+      .join("\n\n---\n\n");
+
+    const lastRaw = messages.slice(-5);
+    const lastRawSection = lastRaw
+      .map(m => `${(m.role || "assistant").toUpperCase()}:\n${m.content}`)
+      .join("\n\n");
+
+    const prompt =
+      "You are Grok resuming a very long conversation whose full text no longer fits in context.\n\n" +
+      "Token Cop ran a local gravity‑chunking pass (seed sentences + proximity + caramel + disease spread) over the last ~40k tokens. " +
+      "You are given only the highest‑gravity chunks plus the last few raw turns.\n\n" +
+      "Your job:\n" +
+      "1. Reconstruct the important facts, characters, decisions, constraints, and open loops.\n" +
+      "2. Preserve the user's tone, preferences, and any inside jokes.\n" +
+      "3. Produce a single, structured summary (headings and bullets are fine) under ~800 words that makes it easy to continue the conversation without repeating questions.\n" +
+      "4. Emphasize: running plans, TODOs, deadlines, hypotheses, experiments, and any promises the assistant made.\n\n" +
+      "Use only the information below. If something is missing, infer carefully or acknowledge uncertainty.\n\n" +
+      "--- HIGH-GRAVITY CONTEXT CHUNKS (NON-CHRONOLOGICAL, DE-DUPED) ---\n\n" +
+      chunkSection +
+      "\n\n--- MOST RECENT RAW TURNS (LATEST LAST) ---\n\n" +
+      lastRawSection +
+      "\n\nOutput ONLY the reconstructed summary, nothing else.\n\n" +
+      "(Continued by Token Cop Gravity Chunking — infinite mode active 🚔🪐)";
+
+    return prompt;
+  };
+
+  // ------------------------------------------------------------------------
 
   const safeGet = key => {
     try {
@@ -578,13 +1019,7 @@
     );
 
     const messages = harvestMessages({ scrollAll: true });
-    const text = messages.map(m => m.content).join("\n\n");
-
-    const summaryPrompt =
-      "Summarize this entire conversation in under 800 words. Keep facts, decisions, tone, and inside jokes. Output ONLY the summary:" +
-      "\n\n" +
-      text +
-      "\n\n(Continued by Token Cop — infinite mode active 🚔)";
+    const summaryPrompt = buildGravitySummaryPrompt(messages);
 
     spawnFork(summaryPrompt, "reap");
 
@@ -710,7 +1145,11 @@
         }
       } catch (_) {}
 
-      void addLedgerEntry("proof", { hash, origin: payload.origin, ts: payload.ts });
+      void addLedgerEntry("proof", {
+        hash,
+        origin: payload.origin,
+        ts: payload.ts
+      });
 
       const b = ensureBadge();
       b.innerHTML = "CONTEXT FINGERPRINT COPIED ✅";
@@ -740,11 +1179,13 @@
       "position:fixed;inset:5%;background:#000;border:4px solid #0f0;border-radius:20px;box-shadow:0 0 80px #0f0;z-index:2147483647;color:#0f0;font-family:'Courier New',monospace;padding:20px;overflow:auto;";
 
     const header = document.createElement("div");
-    header.style.cssText = "text-align:center;font-size:28px;margin-bottom:12px;";
+    header.style.cssText =
+      "text-align:center;font-size:28px;margin-bottom:12px;";
     header.textContent = "🚔 TRUTHRUN SHADOW LEDGER 🚔";
 
     const status = document.createElement("div");
-    status.style.cssText = "text-align:center;font-size:12px;margin-bottom:12px;opacity:.8;";
+    status.style.cssText =
+      "text-align:center;font-size:12px;margin-bottom:12px;opacity:.8;";
     status.textContent = "verifying chain…";
 
     const list = document.createElement("div");
@@ -758,11 +1199,12 @@
       const id = String(entry.id || "").slice(-8);
       const hash = String(entry.hash || "").slice(0, 18);
       const when = entry.ts ? new Date(entry.ts).toLocaleString() : "n/a";
-      const msgCount = entry.data && typeof entry.data.messageCount === "number"
-        ? entry.data.messageCount
-        : entry.data && entry.data.preview
-        ? "~"
-        : "n/a";
+      const msgCount =
+        entry.data && typeof entry.data.messageCount === "number"
+          ? entry.data.messageCount
+          : entry.data && entry.data.preview
+          ? "~"
+          : "n/a";
       row.innerHTML =
         `<strong>#${id}</strong> · ${when}<br>` +
         `Type: ${entry.type} · Hash: ${hash}…<br>` +
@@ -795,8 +1237,27 @@
     verifyLedger().then(ok => {
       status.textContent = ok ? "chain verified ✔︎" : "ledger tampered ⚠︎";
       status.style.color = ok ? "#0f0" : "#f00";
+      status.innerHTML = ok
+        ? "CHAIN VERIFIED — UNBREAKABLE ✔"
+        : "LEDGER TAMPERED — ALERT 🚨";
     });
   };
+
+  // track last hovered message for keyboard-only fork
+  document.addEventListener(
+    "mousemove",
+    e => {
+      let node = e.target;
+      while (node && node !== document.body) {
+        if (node.matches && node.matches(MESSAGE_SELECTOR)) {
+          lastHoveredMessageEl = node;
+          break;
+        }
+        node = node.parentNode;
+      }
+    },
+    true
+  );
 
   document.addEventListener("keydown", e => {
     if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
@@ -837,6 +1298,52 @@
       e.preventDefault();
       e.stopPropagation();
       contextProof();
+    } else if (key === "F") {
+      // Alt+F: keyboard-only fork (even if buttons are squished)
+      e.preventDefault();
+      e.stopPropagation();
+
+      paintBadge(
+        parodyMode ? `🚔 ${P.fork} 🚔` : "FORKING REALITY...",
+        "#ff0"
+      );
+
+      const history = harvestMessages({
+        upToElement: lastHoveredMessageEl || null,
+        scrollAll: true
+      });
+      const msgs =
+        history.length > 0
+          ? history
+          : [
+              {
+                role: "system",
+                content:
+                  "Token Cop fork created with no captured context. Continue as a fresh parallel universe."
+              }
+            ];
+
+      const prompt =
+        msgs
+          .map(m => `${m.role.toUpperCase()}:\n${m.content}`)
+          .join("\n\n") +
+        "\n\n(Continued from Token Cop Full-Chain Fork — keyboard fork active 🚔↔️)";
+
+      spawnFork(prompt, "fork");
+    } else if (key === "R") {
+      // Alt+R: manual gravity auto-reap
+      e.preventDefault();
+      e.stopPropagation();
+
+      paintBadge(
+        parodyMode ? `🚔 ${P.reaping} 🚔` : "REAPING...",
+        "#00f",
+        "#00f"
+      );
+
+      const messages = harvestMessages({ scrollAll: true });
+      const summaryPrompt = buildGravitySummaryPrompt(messages);
+      spawnFork(summaryPrompt, "reap");
     }
   });
 
@@ -879,16 +1386,25 @@
     `%cTOKEN COP ${VERSION} — Local Fork Bus online. Shadow DOM can't hide.`,
     "color:lime;font-size:18px;font-weight:bold"
   );
-})();
 
-// Easter egg — type "cop" in the Grok input to make the badge salute
-document.addEventListener("input", e => {
-  if (e.target.tagName === "TEXTAREA" && e.data === "cop") {
-    badge.innerHTML = "🚔🫡 TOKEN COP REPORTING FOR DUTY 🫡🚔";
-    badge.style.borderColor = "#00f";
-    badge.style.color = "#00f";
-    badge.style.boxShadow = "0 0 100px blue";
-    badge.style.boxShadow = "0 0 100px blue";
-    setTimeout(() => badge.innerHTML = defaultBadgeHTML(), 4000);
-  }
-});
+  // Easter egg — type "cop" in the Grok input to make the badge salute (now safely scoped)
+  document.addEventListener("input", e => {
+    const t = e.target;
+    if (!t || (t.tagName !== "TEXTAREA" && t.getAttribute("role") !== "textbox"))
+      return;
+    if (typeof e.data !== "string") return;
+    if (!e.data.toLowerCase().includes("cop")) return;
+
+    const b = ensureBadge();
+    b.innerHTML = "🚔🫡 TOKEN COP REPORTING FOR DUTY 🫡🚔";
+    b.style.borderColor = "#00f";
+    b.style.color = "#00f";
+    b.style.boxShadow = "0 0 100px blue";
+    setTimeout(() => {
+      b.innerHTML = defaultBadgeHTML();
+      b.style.borderColor = "#0f0";
+      b.style.color = "#0f0";
+      b.style.boxShadow = "0 0 60px #0f0";
+    }, 4000);
+  });
+})();
